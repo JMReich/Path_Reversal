@@ -10,9 +10,11 @@ import net.minecraft.nbt.TagParser;
 import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.item.ShovelItem;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.component.SwingAnimation;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
@@ -24,7 +26,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 
-@Mixin(ShovelItem.class)
+@Mixin(Item.class)
 public class ShovelMixin {
 //
 //    private static BlockPos lastProcessedPos = null;
@@ -35,7 +37,7 @@ public class ShovelMixin {
     private void useOnPath(UseOnContext context, CallbackInfoReturnable<InteractionResult> cir) {
         BlockPos pos = context.getClickedPos();
         Level level = context.getLevel();
-        
+        if (!context.getItemInHand().is(ItemTags.SHOVELS)) return;
 
 
         
@@ -56,14 +58,20 @@ public class ShovelMixin {
         // Revert DIRT_PATH back to original block or grass block
         if (block == Blocks.DIRT_PATH) {
             if(!level.isClientSide()) {
-                player.swing(context.getHand(), true);
-                level.playSound(null, pos, SoundEvents.SHOVEL_FLATTEN, SoundSource.BLOCKS, 1, 1);
+                player.swing(context.getHand(), SwingAnimation.DEFAULT, true);
+                level.playSound(null, pos, SoundEvents.SHOVEL_FLATTEN.value(), SoundSource.BLOCKS, 1, 1);
 
 
                 PathBlockData data = PathBlockData.get(level);
                 String key = getStorageKey(level, pos);
                 String storedState = data.getBlockState(key);
                 BlockState revertState = deserializeBlockState(storedState, level);
+                
+                // Safety check - if revertState is somehow null or air, default to grass block
+                if (revertState == null || revertState.getBlock() == Blocks.AIR) {
+                    revertState = Blocks.GRASS_BLOCK.defaultBlockState();
+                }
+                
                 data.removeBlockState(key);
 
                 level.setBlock(pos, revertState, 3);
@@ -105,17 +113,43 @@ public class ShovelMixin {
     }
 
     private BlockState deserializeBlockState(String serialized, Level level) {
+        if (serialized == null || serialized.isEmpty()) {
+            return Blocks.GRASS_BLOCK.defaultBlockState();
+        }
+        
+        // Special case for the default block state string
+        if ("minecraft:grass_block".equals(serialized)) {
+            return Blocks.GRASS_BLOCK.defaultBlockState();
+        }
+        
         try {
             HolderGetter<Block> holderGetter = level.registryAccess().lookupOrThrow(Registries.BLOCK);
             try {
                 // New format: full SNBT block state (e.g. {Name:"mod:block",Properties:{...}})
                 CompoundTag tag = TagParser.parseCompoundFully(serialized);
-                return NbtUtils.readBlockState(holderGetter, tag);
+                BlockState result = NbtUtils.readBlockState(holderGetter, tag);
+                if (result == null || result.getBlock() == Blocks.AIR) {
+                    return Blocks.GRASS_BLOCK.defaultBlockState();
+                }
+                return result;
             } catch (Exception e) {
                 // Old format fallback: plain block ID string (e.g. "mod:block")
+                // Create a proper NBT tag from the block ID
                 CompoundTag tag = new CompoundTag();
                 tag.putString("Name", serialized);
-                return NbtUtils.readBlockState(holderGetter, tag);
+                
+                BlockState result = null;
+                try {
+                    result = NbtUtils.readBlockState(holderGetter, tag);
+                } catch (Exception parseException) {
+                    // If parsing fails, default to grass
+                    return Blocks.GRASS_BLOCK.defaultBlockState();
+                }
+                
+                if (result == null || result.getBlock() == Blocks.AIR) {
+                    return Blocks.GRASS_BLOCK.defaultBlockState();
+                }
+                return result;
             }
         } catch (Exception e) {
             return Blocks.GRASS_BLOCK.defaultBlockState();
